@@ -1,0 +1,133 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "fmartig"
+output: html_document
+---
+
+###Introduction  
+
+Measuring one's physical performance is becoming increasingly popular; however, being able to determine whether an activity is being correctly performed has its importance as well. Indeed, a poorly executed exercise can lead to injuries.   
+The aim of this project is to use data collected from four on-body sensors on six subjects to determine the quality of execution of a weight lifting exercise.  
+The data and additional information can be found [here](http://groupware.les.inf.puc-rio.br/har) (Weight Lifting Exercises Dataset).  
+Three different models were build using a training set and tested on an independent data set. The highest accuracy was obtained using a random forests model with 10-fold cross-validation. This classifier was found to predict on new data with an accuracy of over 0.99%. However, the two other models were much faster to build. In this situation, the additional goal was to build a model that would perform very well on the course "Prediction Quiz"; as a result, scalability and interpretability are less important than accuracy.  
+   
+
+###Data loading and exploratory analysis
+
+The training and the testing sets are available here: [training](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and [testing](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).The code used to download them can be found in the corresponding .Rmd file in the GitHub repository.
+
+```{r setting_up, eval=FALSE, echo=FALSE}
+setwd("~/Documents//Data_science/08_MachLearning//Exercises/Assignment/")
+
+fileUrl="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl,destfile="~/Documents//Data_science/08_MachLearning//Exercises/Assignment/pml-training.csv",method="curl")
+
+fileUrl2="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileUrl2,destfile="~/Documents//Data_science/08_MachLearning//Exercises/Assignment/pml-testing.csv",method="curl")
+```
+
+```{r loading_libraries,message=FALSE,cache=TRUE}
+library(caret);library(ggplot2);library(parallel);library(doParallel)
+```
+
+```{r loading_data, cache=TRUE}
+training<-read.csv("pml-training.csv")
+testing<-read.csv("pml-testing.csv")
+````
+The original training dataset contains 19622 observations and 160 variables. The quality of execution of the exercise is recorded in the "classe" variable, a qualitative variable with 5 levels, corresponding to either a correctly performed exercise (classe A) or a different type of pre-defined mistakes (classes B to E). This variable is our outcome. The testing set provided contains only 20 observations, without the outcome and can only be used as a final validation step, the "Prediction Quiz" exercise.   
+Among the 160 variables, 96 are "derived features" that were computed for the purpose of the original study by Vellosso et al., which is described in this [paper](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf). They were calculated on time slices that cannot be used to fit a model in our context: the testing dataset provided, and on which the model has to be eventually evaluated, was not built using time slices. As a result, even though it would appear that data recorded from a continuous movement would be dependent over time, here we have to treat them as independent, and only the variables corresponding to the primary measurements are kept for the assignment. These variables were identified based on the explanation given in the cited paper and were selected with the code below:
+
+```{r subsetting_one,cache=TRUE}
+selection<-grepl("^accel.*|^gyros.*|^magnet.*|^roll.*|^pitch.*|^yaw.*|^classe|^total_accel.*",names(training))
+trainsubset<-training[,selection]
+testsubset<-testing[,selection]
+```
+
+The training data is then split into two subsets, one for exploratory analysis and model building, the other to test the model obtained.
+
+```{r subsetting_two,cache=TRUE} 
+set.seed(125)
+inTrain<-createDataPartition(y=trainsubset$classe,p=0.7,list=FALSE)
+trainingS<-trainsubset[inTrain,]
+testingS<-trainsubset[-inTrain,]
+```
+
+The output from the `summary()` function or a plot created by `featurePlot()` are not displayed here: there are too many variables for them to be readable and informative.  
+
+With the selection carried out above, there are no more missing values in the datasets.  
+
+```{r exploration_one}
+table(trainingS$classe)
+```
+
+The presence of zero covariates is checked
+```{r zero_cov,cache=TRUE}
+nsv<-nearZeroVar(trainingS,saveMetrics=FALSE)
+nsv
+```
+
+There are no zero covariates in the subset.
+
+
+###Model building and selection  
+
+####Quadratic discriminant analysis  
+
+First, perform Principal Component Analysis to obtain a summary of the variables that includes most of the information of these quantitative variables
+
+Try: quadratic discriminant analysis
+```{r qda_fit,cache=TRUE,message=FALSE}
+set.seed(130)
+preproc<-preProcess(trainingS[,-53],method="pca")
+trainPC<-predict(preproc,trainingS[,-53])
+modFit3<-train(trainingS$classe~.,method="qda",data=trainPC,trControl=trainControl(method="cv",number=10))
+
+testPC<-predict(preproc,testingS[,-53])
+confusionMatrix(testingS$classe,predict(modFit3,testPC))
+```
+
+
+#### Boosting with trees
+
+ 
+```{r gbm_fit,cache=TRUE,message=FALSE}
+#computationally intensive method
+#use parallel processing to parallelize the operations on 3 cores
+cluster<-makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+set.seed(135)
+ModFit2 <-train(classe~.,method="gbm", verbose=FALSE,data=trainingS,
+                trControl=trainControl(method="cv",number=10,allowParallel=TRUE))
+stopCluster(cluster)
+```
+
+```{r gbm_test,cache=TRUE}
+pred2<-predict(ModFit2,testingS)
+confusionMatrix(testingS$classe,pred2)
+```
+
+####Random Forests
+when doing RF, v. important to use cross validation. train() handles it for us
+
+```{r rf_fit,cache=TRUE}
+set.seed(140)
+modFit1<-train(classe~.,method="rf",prox=TRUE,data=trainingS,
+            trControl=trainControl(method="cv",number=10))
+```
+It can be noted that parallel processing is not used in this case: it was found that on the machine used, the limiting factor was not the CPU but the memory, and parallelizing the operations on several cores did not improve performance. 
+
+```{r rf_test,cache=TRUE}
+pred<-predict(modFit1,testingS)
+confusionMatrix(testingS$classe,pred)
+
+```
+
+Plot residuals by index
+```{r residuals_by_index,cache=TRUE}
+x<-seq(1:nrow(testingS))
+data<-data.frame(x,pred)
+ggplot(data, aes(x=x,y=pred))+geom_point()
+```
+
+
+Since a 0.993% accuracy seemed sufficient, no adjustment was made to the model obtained with Random Forests, and it was applied to the blind testing set provided for the "project prediction quiz": 20 predictions out of 20 were correct.
